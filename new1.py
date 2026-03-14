@@ -33,14 +33,6 @@ DATA_FOLDERS = {
     "February_14": "player_data/February_14",
 }
 
-DAY_LABELS = {
-    "February_10": "Feb 10",
-    "February_11": "Feb 11",
-    "February_12": "Feb 12",
-    "February_13": "Feb 13",
-    "February_14": "Feb 14",
-}
-
 MAPS = ["AmbroseValley", "GrandRift", "Lockdown"]
 
 ZONE_STYLES = {
@@ -88,6 +80,9 @@ def world_to_pixel(x, z, map_id):
 def fmt_time(s):
     return f"{int(s)//60}:{int(s)%60:02d}"
 
+def format_day_label(day):
+    return day.replace("_", " ").title()
+
 # ─────────────────────────────────────────
 # LOAD DATA — LOCAL
 # ─────────────────────────────────────────
@@ -129,20 +124,16 @@ def load_from_zip(zip_bytes):
                     if map_key.lower() in name.lower():
                         with z.open(name) as f:
                             minimap_images[map_key] = Image.open(f).copy()
-            # ── Skip directories and files with extensions ──
+            # ── Skip directories ──
             if name.endswith('/'):
                 continue
+            # ── Skip files with extensions ──
             fname = name.split('/')[-1]
             if '.' in fname:
                 continue
-            # ── Find day folder ──
-            day_name = None
-            for part in name.split('/'):
-                if part in DATA_FOLDERS:
-                    day_name = part
-                    break
-            if day_name is None:
-                continue
+            # ── Auto detect day from parent folder ──
+            parts    = name.split('/')
+            day_name = parts[-2] if len(parts) >= 2 else "Unknown"
             try:
                 with z.open(name) as f:
                     df = pq.read_table(f).to_pandas()
@@ -492,7 +483,7 @@ map_data = df[df['map_id'] == selected_map].copy()
 st.divider()
 
 # ─────────────────────────────────────────
-# DATE FILTER
+# DATE FILTER — DYNAMIC
 # ─────────────────────────────────────────
 st.markdown("""
 <div style='font-size:12px; letter-spacing:4px; color:#00ff88;
@@ -500,14 +491,20 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 available_days = sorted(map_data['day'].unique().tolist())
-date_cols      = st.columns(len(available_days))
-selected_days  = []
+
+if not available_days:
+    st.warning("No data available for this map.")
+    st.stop()
+
+date_cols     = st.columns(len(available_days))
+selected_days = []
 
 for i, day in enumerate(available_days):
     with date_cols[i]:
-        day_count = map_data[map_data['day'] == day]['match_id'].nunique()
-        checked   = st.checkbox(
-            f"**{DAY_LABELS.get(day, day)}**  \n`{day_count} matches`",
+        day_count     = map_data[map_data['day'] == day]['match_id'].nunique()
+        display_label = day.replace("_", " ").title()
+        checked       = st.checkbox(
+            f"**{display_label}**  \n`{day_count} matches`",
             value=True,
             key=f"day_{day}"
         )
