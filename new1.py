@@ -5,6 +5,8 @@ import plotly.graph_objects as go
 import numpy as np
 import os
 import time
+import zipfile
+import io
 from PIL import Image
 from sklearn.cluster import KMeans
 
@@ -87,7 +89,7 @@ def fmt_time(s):
     return f"{int(s)//60}:{int(s)%60:02d}"
 
 # ─────────────────────────────────────────
-# LOAD DATA
+# LOAD DATA — LOCAL
 # ─────────────────────────────────────────
 @st.cache_data
 def load_all_data():
@@ -113,10 +115,59 @@ def load_all_data():
     return pd.concat(all_frames, ignore_index=True) if all_frames else pd.DataFrame()
 
 # ─────────────────────────────────────────
+# LOAD DATA — FROM ZIP
+# ─────────────────────────────────────────
+@st.cache_data
+def load_from_zip(zip_bytes):
+    all_frames     = []
+    minimap_images = {}
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as z:
+        for name in z.namelist():
+            # ── Load minimaps ──
+            if name.lower().endswith(('.png', '.jpg', '.jpeg')):
+                for map_key in ["AmbroseValley", "GrandRift", "Lockdown"]:
+                    if map_key.lower() in name.lower():
+                        with z.open(name) as f:
+                            minimap_images[map_key] = Image.open(f).copy()
+            # ── Skip directories and files with extensions ──
+            if name.endswith('/'):
+                continue
+            fname = name.split('/')[-1]
+            if '.' in fname:
+                continue
+            # ── Find day folder ──
+            day_name = None
+            for part in name.split('/'):
+                if part in DATA_FOLDERS:
+                    day_name = part
+                    break
+            if day_name is None:
+                continue
+            try:
+                with z.open(name) as f:
+                    df = pq.read_table(f).to_pandas()
+                df['event'] = df['event'].apply(
+                    lambda x: x.decode('utf-8') if isinstance(x, bytes) else x
+                )
+                df['day']      = day_name
+                df['is_bot']   = df['user_id'].apply(lambda x: str(x).isdigit())
+                df['match_id'] = df['match_id'].apply(
+                    lambda x: x.replace('.nakama-0', '') if isinstance(x, str) else x
+                )
+                all_frames.append(df)
+            except Exception:
+                continue
+    df_all = pd.concat(all_frames, ignore_index=True) if all_frames else pd.DataFrame()
+    return df_all, minimap_images
+
+# ─────────────────────────────────────────
 # PLOT HELPERS
 # ─────────────────────────────────────────
 def get_minimap_figure(map_id, height=600):
-    img = Image.open(MINIMAP_PATHS[map_id])
+    if "minimap_images" in st.session_state and map_id in st.session_state.minimap_images:
+        img = st.session_state.minimap_images[map_id]
+    else:
+        img = Image.open(MINIMAP_PATHS[map_id])
     fig = go.Figure()
     fig.add_layout_image(dict(
         source=img, xref="x", yref="y",
@@ -326,14 +377,64 @@ st.markdown("""
 st.divider()
 
 # ─────────────────────────────────────────
+# UPLOAD SECTION
+# ─────────────────────────────────────────
+st.markdown("""
+<div style='background:linear-gradient(135deg,#1a1a2e,#16213e);
+            border-left:4px solid #00ff88; border-radius:8px;
+            padding:14px 20px; margin-bottom:16px;'>
+    <div style='font-size:11px; letter-spacing:4px;
+                color:#00ff88; font-weight:700;'>DATA SOURCE</div>
+    <div style='font-size:20px; font-weight:900; color:#ffffff;'>
+        Upload Player Data</div>
+    <div style='font-size:13px; color:#888; margin-top:4px;'>
+        Upload your player_data ZIP file containing parquet files and minimaps.
+    </div>
+</div>
+""", unsafe_allow_html=True)
+
+uploaded_zip = st.file_uploader(
+    "Upload player_data ZIP",
+    type=["zip"],
+    label_visibility="collapsed"
+)
+
+if "minimap_images" not in st.session_state:
+    st.session_state.minimap_images = {}
+
+# ─────────────────────────────────────────
 # LOAD DATA
 # ─────────────────────────────────────────
-with st.spinner("Loading gameplay data..."):
-    df = load_all_data()
+if uploaded_zip is not None:
+    with st.spinner("Extracting and loading data from ZIP..."):
+        df, zip_minimaps = load_from_zip(uploaded_zip.read())
+        if zip_minimaps:
+            st.session_state.minimap_images = zip_minimaps
+    if df.empty:
+        st.error("No parquet data found in ZIP — check folder structure")
+        st.stop()
+    else:
+        st.success(f"✅ Loaded {len(df):,} events from uploaded ZIP")
+else:
+    with st.spinner("Loading local gameplay data..."):
+        df = load_all_data()
+    if df.empty:
+        st.markdown("""
+        <div style='text-align:center; padding:60px 40px;
+                    background:#111827; border-radius:12px;
+                    border:1px solid rgba(0,255,136,0.2);
+                    margin-top:16px;'>
+            <div style='font-size:40px; margin-bottom:16px;'>📁</div>
+            <div style='color:#00ff88; font-size:18px; font-weight:700;
+                        letter-spacing:2px;'>NO DATA FOUND</div>
+            <div style='color:#555; font-size:13px; margin-top:10px;'>
+                Please upload your player_data ZIP file above to get started.
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+        st.stop()
 
-if df.empty:
-    st.error("No data loaded — check your player_data folder")
-    st.stop()
+st.divider()
 
 # ─────────────────────────────────────────
 # TOP STATS
@@ -722,7 +823,6 @@ else:
             unsafe_allow_html=True
         )
 
-        # ── Controls ──
         ctrl1, ctrl2, ctrl3, ctrl4 = st.columns([1, 1, 1, 3])
         with ctrl1:
             play_btn  = st.button("▶  PLAY",  use_container_width=True)
@@ -748,7 +848,6 @@ else:
             step=1, label_visibility="collapsed"
         )
 
-        # ── Progress bar ──
         pct = (current_time / total_seconds) * 100
         st.markdown(f"""
         <div style='display:flex; align-items:center; gap:12px; margin-bottom:16px;'>
@@ -775,7 +874,6 @@ else:
         </div>
         """, unsafe_allow_html=True)
 
-        # ── PLAY mode ──
         if play_btn:
             step   = max(1, speed * 2)
             ph_map = st.empty()
@@ -823,7 +921,6 @@ else:
             st.session_state.tl_time = 0
 
         else:
-            # ── Static snapshot — only show if slider moved ──
             if current_time > 0:
                 snap     = player_events_tl[player_events_tl['ts_sec'] <= current_time]
                 pos_snap = snap[snap['event'].isin(['Position','BotPosition'])]
